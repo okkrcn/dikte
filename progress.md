@@ -21,5 +21,8 @@
   Two compiled binaries had different CDHashes and the same certificate-backed
   designated requirement; the second satisfied the first's requirement.
 - Installed certificate-signed bundle verified with `codesign --verify --strict`
-  and started successfully. Awaiting the one-time user permission refresh before
-  checking permission retention through another installation.
+  and started successfully. User refreshed permissions once and confirmed pasting.
+- Ran the installer again with the new commit/version. The installed designated
+  requirement remained identical and satisfied the previous requirement. A fresh
+  LaunchServices-launched process returned `AXIsProcessTrusted() == True` without
+  another permission refresh; the newest dictation had no paste warning.
