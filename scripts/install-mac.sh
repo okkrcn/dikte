@@ -126,49 +126,114 @@ else
 fi
 
 # 3. The application bundle -------------------------------------------------
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# Build and verify away from the live bundle. A failed build/signature must
+# leave the currently permitted application intact.
+mkdir -p "$APP_DIR"
+WORK="$(mktemp -d "$APP_DIR/.dikte-install.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+BUILD_APP="$WORK/Dikte.app"
+SIGN_PLAN="$WORK/signing.json"
+"$PY" "$DIR/scripts/mac_signing.py" prepare "$APP" "$SIGN_PLAN" \
+  || die "Could not preserve the signing identity. Nothing was installed."
+mkdir -p "$BUILD_APP/Contents/MacOS" "$BUILD_APP/Contents/Resources"
 
-# The interpreter is copied in rather than run where it lies, and that copy is
-# what the whole of macOS's idea of "which application is this" rests on.
+# The process macOS grants Accessibility to has to be the bundle's own
+# executable, and it has to stay that process. A shell script that exec'd a
+# copied python3 left two signatures: the switch in System Settings granted
+# the script, and AXIsProcessTrusted kept answering no for the interpreter
+# that actually pastes. Linking libpython and calling Py_Main in-process
+# keeps the running image as Dikte, which is also what files the microphone
+# and the menu bar icon under this bundle rather than under Homebrew's Python.
 #
-# A bundle whose launcher runs an interpreter somewhere else is not that
-# interpreter's application: the process is /opt/homebrew/…/python3.13, so that
-# is the name in the microphone dialog, that is the row in Accessibility, and
-# every application on the machine sharing that interpreter shares the
-# permission. Copied to Contents/MacOS and exec'd from there, the running
-# executable sits inside Dikte.app, macOS reads the Info.plist above it, and
-# the permissions are Dikte's: its name, its icon, its row.
-#
-# The copy runs because the framework it links against is named by an absolute
-# path; what it loses is the tree it was found in, which is what PYTHONHOME and
-# PYTHONPATH below hand back. Both of those are what a `brew upgrade python`
-# moves out from under it, so the launcher checks before it starts: a bundle
-# that fails silently is a menu bar with nothing in it and no way to guess why.
-PY_REAL="$("$PY" -c 'import os, sys; print(os.path.realpath(getattr(sys, "_base_executable", sys.executable)))')"
+# The framework is named by the stable Homebrew prefix, not a Cellar version
+# baked into a copied binary: a brew upgrade that only moves the versioned
+# directory used to abort at login with no window. PYTHONHOME still has to
+# exist, and there is no terminal to say so when Finder starts the bundle.
 PY_HOME="$("$PY" -c 'import sys; print(sys.base_prefix)')"
 PY_SITE="$("$PY" -c 'import site; print(site.getsitepackages()[0])')"
-cp -f "$PY_REAL" "$APP/Contents/MacOS/python3"
+PY_VERSION="$("$PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+CLANG="$(xcrun --find clang 2>/dev/null || true)"
+[[ -n "$CLANG" ]] || die "clang is not installed. Run: xcode-select --install"
+LAUNCHER_SRC="$WORK/launcher.c"
+cat > "$LAUNCHER_SRC" <<EOF
+/* Written by install-mac.sh. Edit that, not this. */
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 
-# exec, and this time it is right. The earlier version of this script did not
-# exec, because exec'ing an interpreter outside the bundle throws away the
-# application registration LaunchServices handed to the process it started, and
-# what is left answers the socket while drawing no menu bar icon at all. The
-# target here is inside the bundle, so the registration survives it.
-cat > "$APP/Contents/MacOS/Dikte" <<EOF
-#!/bin/sh
-# Written by install-mac.sh. Edit that, not this.
-HERE=\$(cd "\$(dirname "\$0")" && pwd)
-export PYTHONHOME="$PY_HOME"
-export PYTHONPATH="$PY_SITE"
-# Started from the Finder there is no terminal to print to, so the one thing
-# that can go wrong on its own says so in a dialog.
-if [ ! -d "\$PYTHONHOME" ]; then
-  osascript -e 'display alert "Dikte" message "The Python this was installed against is gone, most likely after a brew upgrade. Run ./install.sh again."' >/dev/null 2>&1
-  exit 1
-fi
-exec "\$HERE/python3" "$ENTRY" --gui "\$@"
+#define PYHOME "$PY_HOME"
+#define PYSITE "$PY_SITE"
+#define ENTRY "$ENTRY"
+
+static int skip_arg(const char *arg) {
+    return strncmp(arg, "-psn_", 5) == 0;
+}
+
+int main(int argc, char **argv) {
+    struct stat st;
+    if (argc < 1 || !argv[0])
+        return 1;
+    if (stat(PYHOME, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        system("osascript -e 'display alert \\"Dikte\\" message \\"The Python this was installed against is gone, most likely after a brew upgrade. Run ./install.sh again.\\"' >/dev/null 2>&1");
+        return 1;
+    }
+    setenv("PYTHONHOME", PYHOME, 1);
+    setenv("PYTHONPATH", PYSITE, 1);
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+
+    int have_script = argc >= 2 && argv[1][0] != '-' && !skip_arg(argv[1]);
+    char **args;
+    int n;
+    if (have_script) {
+        args = argv;
+        n = argc;
+    } else {
+        int extra = 0, has_gui = 0;
+        for (int i = 1; i < argc; i++) {
+            if (skip_arg(argv[i]))
+                continue;
+            extra++;
+            if (strcmp(argv[i], "--gui") == 0)
+                has_gui = 1;
+        }
+        args = calloc((size_t)extra + 4, sizeof(char *));
+        if (!args)
+            return 1;
+        n = 0;
+        args[n++] = argv[0];
+        args[n++] = ENTRY;
+        if (!has_gui)
+            args[n++] = "--gui";
+        for (int i = 1; i < argc; i++) {
+            if (skip_arg(argv[i]))
+                continue;
+            args[n++] = argv[i];
+        }
+    }
+
+    wchar_t **wargv = calloc((size_t)n + 1, sizeof(wchar_t *));
+    if (!wargv)
+        return 1;
+    for (int i = 0; i < n; i++) {
+        wargv[i] = Py_DecodeLocale(args[i], NULL);
+        if (!wargv[i])
+            return 1;
+    }
+    Py_SetProgramName(wargv[0]);
+    return Py_Main(n, wargv);
+}
 EOF
-chmod +x "$APP/Contents/MacOS/Dikte"
+# xcrun, not the bare clang it finds: the bare binary has no SDK, so
+# assert.h is missing and the launcher does not build.
+xcrun clang -O2 -Wno-deprecated-declarations \
+  -I"$PY_HOME/include/python$PY_VERSION" \
+  -L"$PY_HOME/lib" \
+  -Wl,-rpath,"$PY_HOME/lib" \
+  -lpython"$PY_VERSION" \
+  -o "$BUILD_APP/Contents/MacOS/Dikte" "$LAUNCHER_SRC" \
+  || die "Could not build the Dikte launcher."
 
 # LSUIElement is the line that makes this a menu bar application: no Dock icon,
 # no menu bar of its own, nothing in the app switcher. The usage strings are
@@ -176,7 +241,7 @@ chmod +x "$APP/Contents/MacOS/Dikte"
 # bundle that asks for the microphone without one is killed rather than asked
 # about.
 version="$(cd "$DIR" && git describe --tags --always 2>/dev/null || echo 0)"
-cat > "$APP/Contents/Info.plist" <<EOF
+cat > "$BUILD_APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -199,31 +264,49 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-printf 'APPL????' > "$APP/Contents/PkgInfo"
+printf 'APPL????' > "$BUILD_APP/Contents/PkgInfo"
 
 # The icon, drawn by trayicon.py so that there is no binary in the repository
 # and no second place to change what Dikte looks like. Failing to draw it is
 # not worth stopping for: a bundle with no icon gets the generic one.
-iconset="$(mktemp -d)/Dikte.iconset"
+iconset="$WORK/Dikte.iconset"
 if PYTHONPATH="$DIR" "$PY" -m dikte.trayicon "$iconset" >/dev/null 2>&1 \
-   && iconutil -c icns "$iconset" -o "$APP/Contents/Resources/Dikte.icns" 2>/dev/null; then
+   && iconutil -c icns "$iconset" -o "$BUILD_APP/Contents/Resources/Dikte.icns" 2>/dev/null; then
   ok "Icon drawn"
 else
   warn "Could not build the icon; the bundle gets the generic one"
 fi
-rm -rf "$(dirname "$iconset")"
 
-# Signed, ad-hoc, and this is the load-bearing step. macOS remembers a
-# permission against a code signature; with none, it remembers a path and a
-# hash of the bundle, and every reinstall is a bundle it has never seen, which
-# means granting Accessibility and the microphone again each time. --force
-# because a reinstall is signing over the last signature.
-if codesign --force --sign - --identifier "$AGENT_ID" "$APP" 2>/dev/null; then
-  ok "Application bundle: $APP"
-else
-  warn "Could not sign $APP; macOS will ask for its permissions again on every"
-  say  "reinstall. Install the command line tools: xcode-select --install"
-fi
+# Certificate signing gives updates a stable designated requirement. The
+# helper also verifies the old requirement, and refuses a downgrade or team
+# change before the live application is replaced.
+"$PY" "$DIR/scripts/mac_signing.py" sign "$BUILD_APP" "$SIGN_PLAN" \
+  || die "Signing failed. The installed application was left intact."
+
+# Do not replace the executable underneath a running capture or worker.
+# Quit completely rather than exec-restarting the old process: LaunchServices
+# must start the replacement using its verified bundle identity.
+"$PY" - "$ENTRY" <<'PY'
+import json, subprocess, sys, time
+entry = sys.argv[1]
+def command(*args):
+    return subprocess.run([sys.executable, entry, *args], capture_output=True,
+                          text=True, timeout=10)
+status = json.loads(command('--json', 'status').stdout)
+if status.get('running'):
+    if any(status.get(key) != 'idle' for key in ('dictation', 'ask', 'meeting')):
+        sys.exit('Dikte is busy. Finish the recording or transcription and run the installer again.')
+    command('quit').check_returncode()
+    for _ in range(50):
+        if not json.loads(command('--json', 'status').stdout).get('running'):
+            break
+        time.sleep(0.1)
+    else:
+        sys.exit('Dikte did not stop. The installed application was left intact.')
+PY
+"$PY" "$DIR/scripts/mac_signing.py" publish "$BUILD_APP" "$APP" \
+  || die "Could not replace the application; the previous bundle was restored."
+ok "Application bundle: $APP"
 
 # LaunchServices does not necessarily notice a bundle written under a directory
 # it was not watching, and until it does, `open -a Dikte` cannot find it.

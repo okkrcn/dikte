@@ -85,6 +85,17 @@ tutar. PyQt6 pip'ten değil brew'dan geliyor, Homebrew'un Python'u içine
 kurulmayı reddediyor; sanal ortam kullanacaksan
 `DIKTE_PYTHON=…/venv/bin/python ./install.sh`.
 
+Checkout'tan kurulum, Anahtar Zinciri'nde kullanılabilir bir sertifika varsa
+önce **Developer ID Application**, yoksa **Apple Development** ile imzalar.
+Sonraki kurulumlarda aynı geliştirici ekibini ve sertifika türünü korur;
+imzalama veya önceki kimliğin doğrulaması başarısızsa mevcut uygulamayı değiştirmez.
+Birden fazla uygun sertifika varsa `DIKTE_SIGN_IDENTITY` ile sertifikanın tam
+adını veya SHA-1 parmak izini seçebilirsin. Sertifikasız kurulum geçici imza
+kullanır; bu durumda güncellemeler izinleri yeniden gerektirebilir.
+Eski geçici imzadan sertifikalı imzaya ilk geçişte Mikrofon ve Erişilebilirlik
+izinlerini bir kez yenilemek gerekebilir. Kurulum etkin kayıt veya transkripsiyon
+varken durur; tamamlanınca tekrar çalıştır.
+
 Orada elle derlenmesi gereken tek parça yerel transkripsiyon: whisper.cpp'nin
 macOS sürümü yok, Homebrew'unki de `WHISPER_BUILD_SERVER=OFF` ile derleniyor,
 yani `whisper-cli` kuruluyor, Dikte'nin konuştuğu sunucu değil. Kendin derle

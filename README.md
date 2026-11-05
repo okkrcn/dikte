@@ -87,6 +87,17 @@ itself while it runs. PyQt6 comes from brew rather than pip because Homebrew's
 Python refuses to be installed into, and `DIKTE_PYTHON=…/venv/bin/python
 ./install.sh` points the installer at a virtualenv instead.
 
+Source installs use a usable **Developer ID Application** certificate from
+Keychain, or **Apple Development** when no Developer ID is available. Updates
+keep the same developer team and certificate type, and leave the installed app
+intact if signing or verification against its previous identity fails. With
+multiple matching certificates, set `DIKTE_SIGN_IDENTITY` to the full certificate
+name or SHA-1 fingerprint. Without a certificate, installation uses an ad-hoc
+signature and updates may require permissions again. The first migration from
+ad-hoc to certificate signing may require granting Microphone and Accessibility
+again once. Installation stops during an active recording or transcription;
+finish it before retrying.
+
 Local speech to text is the one piece that has to be built by hand there:
 whisper.cpp publishes no macOS binary and Homebrew's is configured with
 `WHISPER_BUILD_SERVER=OFF`, so it installs `whisper-cli` and not the server
